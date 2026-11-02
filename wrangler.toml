@@ -1,0 +1,11 @@
+name = "royalty-2d-studio-ai"
+main = "worker/index.js"
+compatibility_date = "2026-11-01"
+
+[ai]
+binding = "AI"
+
+[vars]
+IMAGE_MODEL = "@cf/black-forest-labs/flux-1-schnell"
+# Replace with the exact origin of your deployed studio before production.
+ALLOWED_ORIGIN = "http://localhost:5173"
