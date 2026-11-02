@@ -1,5 +1,7 @@
+
 const MODEL = "@cf/black-forest-labs/flux-1-schnell";
 const MAX_PROMPT_LENGTH = 2000;
+const MAX_MODEL_PROMPT_LENGTH = 2048;
 
 function corsHeaders(env) {
   return {
@@ -64,10 +66,21 @@ function detectStyle(prompt, requestedStyle) {
 
 function enhancePrompt(prompt, style) {
   const artDirection = style === "3d"
-    ? "Premium stylized 3D animated character artwork, dimensional sculpted forms, appealing materials, detailed textures and professional 3D lighting."
-    : "Professional 2D animated character illustration, expressive clean linework, deliberate shapes, beautifully finished colours and polished cartoon artwork.";
+    ? "Premium stylized 3D animated character, dimensional forms, detailed materials and professional lighting."
+    : "Professional 2D animated character illustration, clean linework, deliberate shapes and polished cartoon artwork.";
 
-  return `${prompt}\n\nART DIRECTION: ${artDirection}\n\nFULL BODY AND ANATOMY: When the requested framing is full body, show the complete character from the top of the head to the soles of both feet. Keep the whole character inside the image with clear space above and below. Exactly two arms and two legs for an ordinary humanoid character. Show two distinct feet, naturally separated and clearly formed. Avoid accidentally merged, duplicated, missing or cropped limbs. Use natural readable anatomy and a centred composition. Respect unusual anatomy if the user explicitly requests a creature with a different number of limbs.\n\nFINISH: Preserve the user's requested character, clothing, colours, pose and artistic direction. Make facial features and details sharp and clear. No unwanted lettering, watermark, logo, border or signature.`;
+  const extraInstructions =
+    `\n\nART DIRECTION: ${artDirection}` +
+    "\n\nANATOMY: Show the complete character from head to soles of both feet. Keep the entire character inside the image, centred, with space above and below. Ordinary humanoid characters must have exactly two arms and two legs, two distinct feet, natural readable anatomy and no merged, duplicated, missing or cropped limbs. Respect unusual anatomy explicitly requested." +
+    "\n\nFINISH: Preserve the requested identity, facial features, clothing, colours, pose and artistic direction. Make details sharp and clear. No lettering, watermark, logo, border or signature.";
+
+  const availableLength = MAX_MODEL_PROMPT_LENGTH - extraInstructions.length;
+
+  if (availableLength <= 0) {
+    throw new Error("Additional AI instructions exceed the model prompt limit.");
+  }
+
+  return prompt.slice(0, availableLength).trimEnd() + extraInstructions;
 }
 
 export default {
@@ -104,12 +117,15 @@ export default {
     if (path !== "/api/character/generate") {
       return jsonResponse({ success: false, error: "Route not found." }, 404, env);
     }
+
     if (request.method !== "POST") {
       return jsonResponse({ success: false, error: "Use POST to generate a character." }, 405, env);
     }
 
     try {
-      if (!env.AI) throw new Error("Workers AI binding AI is not configured.");
+      if (!env.AI) {
+        throw new Error("Workers AI binding AI is not configured.");
+      }
 
       let body;
       try {
@@ -119,27 +135,47 @@ export default {
       }
 
       const prompt = typeof body.prompt === "string" ? body.prompt.trim() : "";
-      if (!prompt) return jsonResponse({ success: false, error: "Please provide a character description." }, 400, env);
+
+      if (!prompt) {
+        return jsonResponse({ success: false, error: "Please provide a character description." }, 400, env);
+      }
+
       if (prompt.length > MAX_PROMPT_LENGTH) {
-        return jsonResponse({ success: false, error: `Keep the prompt under ${MAX_PROMPT_LENGTH} characters.` }, 400, env);
+        return jsonResponse({
+          success: false,
+          error: `Keep the prompt under ${MAX_PROMPT_LENGTH} characters.`,
+        }, 400, env);
       }
 
       const style = detectStyle(prompt, body.style);
       const requestedSteps = Number(body.steps ?? 4);
-      const steps = Number.isFinite(requestedSteps) ? Math.min(4, Math.max(1, Math.floor(requestedSteps))) : 4;
+      const steps = Number.isFinite(requestedSteps)
+        ? Math.min(4, Math.max(1, Math.floor(requestedSteps)))
+        : 4;
+
       const requestedCount = Number(body.n ?? 1);
-      const count = Number.isFinite(requestedCount) ? Math.min(4, Math.max(1, Math.floor(requestedCount))) : 1;
+      const count = Number.isFinite(requestedCount)
+        ? Math.min(4, Math.max(1, Math.floor(requestedCount)))
+        : 1;
+
       const enhancedPrompt = enhancePrompt(prompt, style);
 
-      console.log("Character generation requested", { style, count, steps, model: MODEL });
+      console.log("Character generation requested", {
+        style,
+        count,
+        steps,
+        model: MODEL,
+        promptLength: enhancedPrompt.length,
+      });
 
-      // Generate sequentially to keep resource use predictable on the free plan.
       const images = [];
+
       for (let i = 0; i < count; i++) {
         const result = await env.AI.run(MODEL, {
           prompt: enhancedPrompt,
           steps,
         });
+
         images.push(await imageToBase64(result));
       }
 
@@ -153,16 +189,22 @@ export default {
         count: images.length,
         mimeType: "image/jpeg",
         images,
-        // First-image fields retained for simple PowerShell testing/backward compatibility.
         imageBase64: images[0],
         imageDataUrl: `data:image/jpeg;base64,${images[0]}`,
         message: `${style.toUpperCase()} character generation completed.`,
       }, 200, env);
+
     } catch (error) {
-      console.error("Royalty 2D Studio AI generation failed:", error?.stack || error?.message || String(error));
+      const errorMessage = error?.message || String(error);
+
+      console.error(
+        "Royalty 2D Studio AI generation failed:",
+        error?.stack || errorMessage
+      );
+
       return jsonResponse({
         success: false,
-        error: "Character generation failed. Check the Worker logs for the detailed error, then try again.",
+        error: `Character generation failed: ${errorMessage}`,
       }, 502, env);
     }
   },
